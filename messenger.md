@@ -6,7 +6,6 @@ import json
 import time
 from datetime import datetime
 from typing import Dict, List, Set
-import select
 
 class LocalMessenger:
     def __init__(self):
@@ -163,6 +162,7 @@ class LocalMessenger:
         server_thread.start()
         
         self.update_status(f"Сервер запущен на {self.host}:{self.port}")
+        self.update_status("Добавьте пользователя через кнопку 'Добавить пользователя'")
     
     def start_server(self):
         """Запуск TCP сервера для приема сообщений"""
@@ -170,12 +170,13 @@ class LocalMessenger:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.server_socket.bind(('0.0.0.0', self.port))
-            self.server_socket.listen(10)
+            self.server_socket.listen(5)
             self.server_socket.settimeout(1)
             
             while self.running:
                 try:
                     client_socket, addr = self.server_socket.accept()
+                    # Обрабатываем клиента в отдельном потоке
                     client_thread = threading.Thread(
                         target=self.handle_client, 
                         args=(client_socket, addr),
@@ -184,70 +185,85 @@ class LocalMessenger:
                     client_thread.start()
                 except socket.timeout:
                     continue
-                except:
+                except Exception as e:
                     if self.running:
-                        break
+                        self.update_status(f"Ошибка сервера: {e}")
+                    break
                     
         except Exception as e:
-            self.update_status(f"Ошибка сервера: {e}")
+            self.update_status(f"Ошибка запуска сервера: {e}")
     
     def handle_client(self, client_socket, addr):
         """Обработка входящих соединений"""
         try:
-            # Получаем данные
+            # Читаем все данные
             data = b""
-            client_socket.settimeout(2)
+            client_socket.settimeout(5.0)
+            
             while True:
                 chunk = client_socket.recv(1024)
                 if not chunk:
                     break
                 data += chunk
-                
+                # Если получили полное сообщение, выходим
+                if len(chunk) < 1024:
+                    break
+                    
             if data:
-                message = json.loads(data.decode('utf-8'))
-                self.process_message(message, addr[0])
+                message_str = data.decode('utf-8').strip()
+                if message_str:
+                    message = json.loads(message_str)
+                    self.process_message(message, addr[0])
                 
+        except json.JSONDecodeError as e:
+            self.update_status(f"Ошибка декодирования JSON от {addr[0]}: {e}")
         except Exception as e:
-            print(f"Ошибка обработки клиента {addr[0]}: {e}")
+            self.update_status(f"Ошибка обработки клиента {addr[0]}: {e}")
         finally:
-            client_socket.close()
+            try:
+                client_socket.close()
+            except:
+                pass
     
     def process_message(self, message: Dict, sender_ip: str):
         """Обработка входящих сообщений"""
-        msg_type = message.get('type')
-        
-        if msg_type == 'handshake':
-            # Новый пользователь представился
-            self.add_user(sender_ip)
-            self.update_status(f"Подключился пользователь {sender_ip}")
+        try:
+            msg_type = message.get('type')
             
-        elif msg_type == 'message':
-            chat_id = message.get('chat_id')
-            content = message.get('content')
-            timestamp = message.get('timestamp')
-            sender = message.get('sender', sender_ip)
-            
-            if chat_id not in self.chats:
-                self.chats[chat_id] = []
+            if msg_type == 'message':
+                chat_id = message.get('chat_id')
+                content = message.get('content', '')
+                timestamp = message.get('timestamp')
+                sender = message.get('sender', sender_ip)
                 
-            self.chats[chat_id].append({
-                'sender': sender,
-                'content': content,
-                'timestamp': timestamp,
-                'type': 'received'
-            })
-            
-            # Если это текущий чат, обновляем отображение
-            if self.current_chat == chat_id:
-                self.display_message(sender, content, timestamp, False)
-            else:
-                # Показываем уведомление о новом сообщении
-                self.show_notification(sender, content)
+                # Автоматически добавляем отправителя в список пользователей
+                if sender_ip != self.host:
+                    self.add_user(sender_ip)
                 
-        elif msg_type == 'group_create':
-            group_name = message.get('group_name')
-            group_id = message.get('group_id')
-            self.add_group(group_id, group_name)
+                if chat_id not in self.chats:
+                    self.chats[chat_id] = []
+                    
+                self.chats[chat_id].append({
+                    'sender': sender,
+                    'content': content,
+                    'timestamp': timestamp,
+                    'type': 'received'
+                })
+                
+                # Если это текущий чат, обновляем отображение
+                if self.current_chat == chat_id:
+                    self.display_message(sender, content, timestamp, False)
+                else:
+                    # Показываем уведомление о новом сообщении
+                    self.show_notification(sender, content)
+                    
+            elif msg_type == 'group_create':
+                group_name = message.get('group_name')
+                group_id = message.get('group_id')
+                self.add_group(group_id, group_name)
+                
+        except Exception as e:
+            self.update_status(f"Ошибка обработки сообщения: {e}")
     
     def show_notification(self, sender: str, message: str):
         """Показываем уведомление о новом сообщении"""
@@ -261,27 +277,29 @@ class LocalMessenger:
     def send_direct_message(self, target_ip: str, message: Dict):
         """Отправка сообщения конкретному пользователю"""
         try:
+            # Создаем сокет с таймаутом
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
+            sock.settimeout(3.0)  # 3 секунды таймаут
+            
+            # Пытаемся подключиться
             sock.connect((target_ip, self.port))
             
-            # Отправляем handshake при первом контакте
-            if target_ip not in self.users:
-                handshake = {
-                    'type': 'handshake',
-                    'sender': self.host,
-                    'timestamp': datetime.now().isoformat()
-                }
-                sock.send(json.dumps(handshake).encode('utf-8'))
-                sock.recv(1024)  # Ждем ответ
+            # Отправляем сообщение
+            message_str = json.dumps(message)
+            sock.sendall(message_str.encode('utf-8'))
             
-            # Отправляем основное сообщение
-            sock.send(json.dumps(message).encode('utf-8'))
+            # Закрываем соединение
             sock.close()
             return True
             
+        except socket.timeout:
+            self.update_status(f"Таймаут подключения к {target_ip}")
+            return False
+        except ConnectionRefusedError:
+            self.update_status(f"Соединение отклонено {target_ip} - убедитесь что мессенджер запущен")
+            return False
         except Exception as e:
-            print(f"Ошибка отправки сообщения {target_ip}: {e}")
+            self.update_status(f"Ошибка отправки на {target_ip}: {str(e)}")
             return False
     
     def add_user(self, ip: str):
@@ -289,7 +307,6 @@ class LocalMessenger:
         if ip != self.host and ip not in self.users:
             self.users.add(ip)
             self.root.after(0, self.update_users_list)
-            self.update_status(f"Добавлен пользователь: {ip}")
     
     def add_group(self, group_id: str, group_name: str):
         """Добавление группы в список"""
@@ -298,21 +315,17 @@ class LocalMessenger:
         existing_groups = [self.groups_listbox.get(i) for i in range(self.groups_listbox.size())]
         if display_name not in existing_groups:
             self.root.after(0, lambda: self.groups_listbox.insert(tk.END, display_name))
-            if not hasattr(self, 'group_mapping'):
-                self.group_mapping = {}
-            self.group_mapping[display_name] = group_id
     
     def update_users_list(self):
         """Обновление списка пользователей"""
         self.users_listbox.delete(0, tk.END)
         for user in sorted(self.users):
-            # Все пользователи считаются онлайн (зеленый)
             self.users_listbox.insert(tk.END, f"🟢 {user}")
     
     def update_status(self, message: str):
         """Обновление статусной строки"""
         self.root.after(0, lambda: self.status_var.set(message))
-        print(f"STATUS: {message}")  # Лог в консоль
+        print(f"STATUS: {message}")
     
     def on_user_select(self, event):
         """Обработка выбора пользователя"""
@@ -351,7 +364,6 @@ class LocalMessenger:
         self.message_entry.focus()
         self.clear_chat_area()
         self.load_chat_history(chat_id)
-        self.update_status(f"Открыта группа: {group_name}")
     
     def create_group(self):
         """Создание новой группы"""
@@ -388,7 +400,7 @@ class LocalMessenger:
         # Отображаем сообщение
         self.display_message(self.host, message_text, timestamp, True)
         
-        # Отправляем сообщение
+        # Создаем сообщение для отправки
         message = {
             'type': 'message',
             'chat_id': self.current_chat,
@@ -397,23 +409,28 @@ class LocalMessenger:
             'timestamp': timestamp
         }
         
+        # Отправляем сообщение в отдельном потоке чтобы не блокировать GUI
         if self.current_chat.startswith('private'):
-            # Личное сообщение
             target_ip = self.current_chat.replace('private_', '')
-            success = self.send_direct_message(target_ip, message)
-            if success:
-                self.update_status(f"Сообщение отправлено {target_ip}")
-            else:
-                self.update_status(f"Не удалось отправить сообщение {target_ip}")
+            thread = threading.Thread(target=self.send_message_thread, 
+                                    args=(target_ip, message), daemon=True)
+            thread.start()
         else:
-            # Групповое сообщение - отправляем всем пользователям
-            success_count = 0
+            # Для групп отправляем всем пользователям
             for user_ip in self.users:
-                if self.send_direct_message(user_ip, message):
-                    success_count += 1
-            self.update_status(f"Сообщение отправлено {success_count} пользователям")
+                thread = threading.Thread(target=self.send_message_thread, 
+                                        args=(user_ip, message), daemon=True)
+                thread.start()
         
         self.message_entry.delete(0, tk.END)
+    
+    def send_message_thread(self, target_ip: str, message: Dict):
+        """Отправка сообщения в отдельном потоке"""
+        success = self.send_direct_message(target_ip, message)
+        if success:
+            self.update_status(f"✓ Сообщение доставлено {target_ip}")
+        else:
+            self.update_status(f"✗ Не доставлено {target_ip}")
     
     def display_message(self, sender: str, content: str, timestamp: str, is_own: bool):
         """Отображение сообщения в чате"""
@@ -430,11 +447,9 @@ class LocalMessenger:
         if is_own:
             prefix = "Вы"
             tag = "own_message"
-            color = "#2c3e50"
         else:
             prefix = sender
             tag = "other_message"
-            color = "#3498db"
         
         # Вставляем сообщение с форматированием
         self.messages_text.insert(tk.END, f"[{time_str}] ", "time")
@@ -473,29 +488,25 @@ class LocalMessenger:
         self.setup_text_tags()
         self.start_network()
         
-        # Добавляем тестовых пользователей автоматически
-        self.root.after(2000, self.add_test_users)
-        
         try:
             self.root.mainloop()
         finally:
             self.running = False
             if self.server_socket:
-                self.server_socket.close()
-    
-    def add_test_users(self):
-        """Автоматически добавляем пользователей из той же подсети"""
-        base_ip = '.'.join(self.host.split('.')[:-1])
-        # Добавляем возможных пользователей (например, 192.168.0.53)
-        for i in [53, 54, 55, 100]:  # Добавьте нужные IP
-            test_ip = f"{base_ip}.{i}"
-            if test_ip != self.host:
-                self.users.add(test_ip)
-        self.update_users_list()
-        self.update_status("Добавлены тестовые пользователи из сети")
+                try:
+                    self.server_socket.close()
+                except:
+                    pass
 
 def main():
     """Основная функция"""
+    print("🚀 Запуск локального мессенджера...")
+    print("📝 Инструкция:")
+    print("1. Запустите на всех компьютерах в сети")
+    print("2. Добавьте IP других компьютеров через кнопку 'Добавить пользователя'")
+    print("3. Выберите пользователя и начинайте общение!")
+    print("-" * 50)
+    
     app = LocalMessenger()
     app.run()
 
