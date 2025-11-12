@@ -279,7 +279,7 @@ class LocalMessenger:
         try:
             # Создаем сокет с таймаутом
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(3.0)  # 3 секунды таймаут
+            sock.settimeout(5.0)  # 5 секунд таймаут
             
             # Пытаемся подключиться
             sock.connect((target_ip, self.port))
@@ -428,9 +428,9 @@ class LocalMessenger:
         """Отправка сообщения в отдельном потоке"""
         success = self.send_direct_message(target_ip, message)
         if success:
-            self.update_status(f"✓ Сообщение доставлено {target_ip}")
+            self.update_status(f"Сообщение доставлено {target_ip}")
         else:
-            self.update_status(f"✗ Не доставлено {target_ip}")
+            self.update_status(f"Не доставлено {target_ip}")
     
     def display_message(self, sender: str, content: str, timestamp: str, is_own: bool):
         """Отображение сообщения в чате"""
